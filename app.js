@@ -4,6 +4,8 @@ const app = express()
 const cors = require('cors');
 const { MongoClient, ServerApiVersion } = require('mongodb');
 const port = process.env.PORT || 3001
+const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 
 app.use(cors()) 
 app.use(express.json())
@@ -18,11 +20,41 @@ const client = new MongoClient(uri, {
   }
 });
 
+// Email transporter setup
+const transporter = nodemailer.createTransport({
+  service: 'Gmail', // or any other email service
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// Generate OTP
+function generateOTP() {
+  return crypto.randomBytes(3).toString('hex'); // 6-digit OTP
+}
+
+// Send OTP via email
+async function sendOTP(email, otp) {
+  const mailOptions = {
+    from: {
+      name:'Bolggin Site',
+      address: process.env.EMAIL_USER
+    },
+    to: email,
+    subject: 'Your OTP Code',
+    text: `Your OTP code is ${otp}`,
+  };
+
+  await transporter.sendMail(mailOptions);
+}
+
 async function run() {
     try {
       await client.connect();
       const postCollection = client.db('database').collection('post');
       const userCollection = client.db('database').collection('user');
+      const otpCollection = client.db('database').collection('otp');
   
       app.get('/post', async (req, res) => {
         const posts = (await postCollection.find().toArray()).reverse();
@@ -75,6 +107,41 @@ async function run() {
         const result = await postCollection.updateMany(filter,updateDoc,options)
         res.send(result);
       })
+
+      app.post('/requestOTP', async (req, res) => {
+        const { email } = req.body;
+        const otp = generateOTP();
+        const timestamp = new Date().getTime();
+      
+        // Store OTP in the database
+        await otpCollection.insertOne({ email, otp, timestamp });
+      
+        // Send OTP via email
+        await sendOTP(email, otp);
+      
+        res.send({ message: 'OTP sent to your email' });
+      });
+      
+      // Verify OTP endpoint
+      app.post('/verifyOTP', async (req, res) => {
+        const { email, otp } = req.body;
+        const record = await otpCollection.findOne({ email, otp });
+      
+        if (!record) {
+          return res.status(400).send({ message: 'Invalid OTP' });
+        }
+      
+        // Check if OTP is expired (valid for 5 minutes)
+        const currentTime = new Date().getTime();
+        if (currentTime - record.timestamp > 5 * 60 * 1000) {
+          return res.status(400).send({ message: 'OTP expired' });
+        }
+      
+        // OTP is valid, remove it from the database
+        await otpCollection.deleteOne({ email, otp });
+      
+        res.send({ message: 'OTP verified successfully' });
+      });
   
       console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } catch (e) {
